@@ -1,0 +1,1379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Book Shop Management System</title>
+
+  <!-- React + Babel (CDN) -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- Tailwind -->
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+
+<body class="bg-gray-50">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useEffect, useMemo, useRef, useState } = React;
+
+    /**************** IndexedDB (PDF storage to avoid localStorage quota) ****************/
+    const DB_NAME = "BOOKSHOP_DB_V2";
+    const STORE = "pdfs";
+
+    function openDB() {
+      return new Promise((resolve, reject) => {
+        const req = indexedDB.open(DB_NAME, 1);
+        req.onupgradeneeded = () => {
+          const db = req.result;
+          if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE);
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+    }
+
+    async function idbSet(key, value) {
+      const db = await openDB();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE, "readwrite");
+        tx.objectStore(STORE).put(value, key);
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => reject(tx.error);
+      });
+    }
+
+    async function idbGet(key) {
+      const db = await openDB();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE, "readonly");
+        const req = tx.objectStore(STORE).get(key);
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => reject(req.error);
+      });
+    }
+
+    async function idbDelete(key) {
+      const db = await openDB();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE, "readwrite");
+        tx.objectStore(STORE).delete(key);
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => reject(tx.error);
+      });
+    }
+
+    const blobToURL = (blob) => URL.createObjectURL(blob);
+
+    /**************** localStorage (small data only) ****************/
+    const LS = {
+      BOOKS: "BS_BOOKS_META_V2",
+      CUSTOMERS: "BS_CUSTOMERS_V2",
+      ORDERS: "BS_ORDERS_V2",
+      RATINGS: "BS_RATINGS_V2",
+      REVIEWS: "BS_REVIEWS_V2",
+      PROGRESS: "BS_PROGRESS_V2",
+    };
+
+    const safeParse = (raw, fallback) => { try { return JSON.parse(raw); } catch { return fallback; } };
+    const load = (key, fallback) => safeParse(localStorage.getItem(key) || "", fallback);
+    const save = (key, value) => localStorage.setItem(key, JSON.stringify(value));
+
+    const DEFAULT_BOOKS = [
+      {
+        id: 1,
+        title: "The Great Gatsby",
+        author: "F. Scott Fitzgerald",
+        price: 450,
+        category: "legendary",
+        image: "https://images.unsplash.com/photo-1544947950-fa07a98d237f?w=900&h=600&fit=crop",
+        hasPdf: false,
+        pdfName: ""
+      },
+      {
+        id: 2,
+        title: "To Kill a Mockingbird",
+        author: "Harper Lee",
+        price: 520,
+        category: "legendary",
+        image: "https://images.unsplash.com/photo-1543002588-bfa74002ed7e?w=900&h=600&fit=crop",
+        hasPdf: false,
+        pdfName: ""
+      },
+      {
+        id: 3,
+        title: "The Alchemist",
+        author: "Paulo Coelho",
+        price: 380,
+        category: "story",
+        image: "https://images.unsplash.com/photo-1512820790803-83ca734da794?w=900&h=600&fit=crop",
+        hasPdf: false,
+        pdfName: ""
+      },
+    ];
+
+    const CATEGORIES = [
+      { id: "all", name: "All Books" },
+      { id: "legendary", name: "Legendary Books" },
+      { id: "story", name: "Story Books" },
+      { id: "famous", name: "Famous Writers" },
+    ];
+
+    const money = (n) => `৳${Number(n || 0).toFixed(0)}`;
+
+    /**************** UI Components ****************/
+    function Toast({ toast, onClose }) {
+      if (!toast.open) return null;
+      const color =
+        toast.type === "success" ? "bg-emerald-50 border-emerald-200" :
+        toast.type === "danger" ? "bg-rose-50 border-rose-200" :
+        toast.type === "info" ? "bg-indigo-50 border-indigo-200" : "bg-gray-50 border-gray-200";
+
+      return (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[2000] w-full max-w-2xl px-4">
+          <div className={`rounded-2xl shadow-2xl border p-4 flex items-start gap-3 ${color}`}>
+            <div className="text-2xl">{toast.emoji || "✨"}</div>
+            <div className="flex-1">
+              <p className="font-bold text-gray-800">{toast.title}</p>
+              <p className="text-sm text-gray-700 mt-1">{toast.message}</p>
+            </div>
+            <button onClick={onClose} className="px-3 py-1 rounded-lg bg-white/70 hover:bg-white border text-sm font-semibold">
+              Close
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    function Modal({ open, onClose, title, subtitle, children, wide=false }) {
+      if (!open) return null;
+      return (
+        <div className="fixed inset-0 z-[1500] flex items-center justify-center bg-black/60 p-4">
+          <div className={`bg-white w-full ${wide ? "max-w-6xl" : "max-w-2xl"} rounded-2xl shadow-2xl overflow-hidden`}>
+            <div className="flex items-center justify-between px-5 py-3 border-b">
+              <div>
+                <p className="font-bold text-gray-800">{title}</p>
+                {subtitle && <p className="text-xs text-gray-500">{subtitle}</p>}
+              </div>
+              <button onClick={onClose} className="px-4 py-2 rounded-lg bg-gray-100 hover:bg-gray-200 font-semibold">✖ Close</button>
+            </div>
+            <div className="p-5">{children}</div>
+          </div>
+        </div>
+      );
+    }
+
+    function Stars({ value, onChange, readonly=false }) {
+      return (
+        <div className="flex gap-1">
+          {[1,2,3,4,5].map(s => (
+            <button
+              key={s}
+              type="button"
+              onClick={() => !readonly && onChange(s)}
+              className={`text-2xl leading-none ${readonly ? "cursor-default" : "hover:scale-110"} transition ${
+                s <= value ? "text-amber-400" : "text-gray-300"
+              }`}
+            >★</button>
+          ))}
+        </div>
+      );
+    }
+
+    function Badge({ children, tone="gray" }) {
+      const cls = {
+        gray: "bg-gray-100 text-gray-800 border-gray-200",
+        green: "bg-emerald-50 text-emerald-700 border-emerald-200",
+        yellow: "bg-yellow-50 text-yellow-800 border-yellow-200",
+        red: "bg-rose-50 text-rose-700 border-rose-200",
+        indigo: "bg-indigo-50 text-indigo-700 border-indigo-200",
+      }[tone] || "bg-gray-100 text-gray-800 border-gray-200";
+      return <span className={`inline-flex items-center px-2.5 py-1 rounded-full border text-xs font-semibold ${cls}`}>{children}</span>;
+    }
+
+    /**************** APP ****************/
+    function App() {
+      /* ✅ ALL HOOKS ARE HERE (TOP LEVEL) — no hooks inside if/else */
+      const [userType, setUserType] = useState(null); // null/customer/admin
+      const [currentUser, setCurrentUser] = useState(null);
+
+      const [loginData, setLoginData] = useState({ username:"", password:"", email:"" });
+      const [showRegister, setShowRegister] = useState(false);
+      const [registerData, setRegisterData] = useState({ email:"", password:"", name:"" });
+
+      const [books, setBooks] = useState(() => load(LS.BOOKS, DEFAULT_BOOKS));
+      const [customers, setCustomers] = useState(() => load(LS.CUSTOMERS, []));
+      const [orders, setOrders] = useState(() => load(LS.ORDERS, []));
+      const [ratings, setRatings] = useState(() => load(LS.RATINGS, {}));
+      const [reviews, setReviews] = useState(() => load(LS.REVIEWS, {}));
+      const [progress, setProgress] = useState(() => load(LS.PROGRESS, {}));
+
+      const [selectedCategory, setSelectedCategory] = useState("all");
+      const [cart, setCart] = useState([]);
+
+      const [profileOpen, setProfileOpen] = useState(false);
+
+      const [confirmCheckoutOpen, setConfirmCheckoutOpen] = useState(false);
+      const [paymentOpen, setPaymentOpen] = useState(false);
+      const [cardNumber, setCardNumber] = useState("");
+
+      const [invoiceOpen, setInvoiceOpen] = useState(false);
+      const [invoiceOrder, setInvoiceOrder] = useState(null);
+
+      const [readerOpen, setReaderOpen] = useState(false);
+      const [readerBook, setReaderBook] = useState(null);
+      const [readerUrl, setReaderUrl] = useState("");
+      const [readerPage, setReaderPage] = useState(1);
+
+      const [passwordModalOpen, setPasswordModalOpen] = useState(false);
+      const [passForm, setPassForm] = useState({ current:"", next:"", confirm:"" });
+
+      const [reviewDraft, setReviewDraft] = useState({});
+
+      const [showAddBook, setShowAddBook] = useState(false);
+      const [newBook, setNewBook] = useState({ title:"", author:"", price:"", category:"story", image:"", hasPdf:false, pdfName:"" });
+
+      const [editOpen, setEditOpen] = useState(false);
+      const [editBook, setEditBook] = useState(null);
+      const [editPdfName, setEditPdfName] = useState("");
+
+      // toast
+      const [toast, setToast] = useState({open:false, type:"success", title:"", message:"", emoji:"✨"});
+      const toastRef = useRef(null);
+      const showToast = (t) => {
+        if (toastRef.current) clearTimeout(toastRef.current);
+        setToast({open:true, ...t});
+        toastRef.current = setTimeout(()=>setToast(p=>({...p, open:false})), 4200);
+      };
+
+      // persist
+      useEffect(()=>save(LS.BOOKS, books), [books]);
+      useEffect(()=>save(LS.CUSTOMERS, customers), [customers]);
+      useEffect(()=>save(LS.ORDERS, orders), [orders]);
+      useEffect(()=>save(LS.RATINGS, ratings), [ratings]);
+      useEffect(()=>save(LS.REVIEWS, reviews), [reviews]);
+      useEffect(()=>save(LS.PROGRESS, progress), [progress]);
+
+      // derived
+      const customer = useMemo(() => (currentUser && currentUser.type !== "admin") ? currentUser : null, [currentUser]);
+
+      const filteredBooks = useMemo(
+        () => selectedCategory === "all" ? books : books.filter(b => b.category === selectedCategory),
+        [books, selectedCategory]
+      );
+
+      const cartTotal = useMemo(
+        () => cart.reduce((s,it)=>s + it.price * it.qty, 0),
+        [cart]
+      );
+
+      const myOrders = useMemo(
+        () => customer ? orders.filter(o => o.customerId === customer.id) : [],
+        [orders, customer]
+      );
+
+      const myPurchasedBookIds = useMemo(() => {
+        const ids = new Set();
+        myOrders.forEach(o => o.items.forEach(it => ids.add(it.bookId)));
+        return ids;
+      }, [myOrders]);
+
+      const isWishlisted = (bookId) => customer?.wishlist?.includes(bookId);
+
+      // ratings helpers
+      const getAvgRating = (bookId) => {
+        const br = ratings?.[bookId] || {};
+        const vals = Object.values(br);
+        if (vals.length === 0) return 0;
+        return vals.reduce((a,b)=>a+b,0)/vals.length;
+      };
+      const getMyRating = (bookId) => customer ? ((ratings?.[bookId]?.[customer.id]) || 0) : 0;
+
+      // reviews helpers
+      const getBookReviews = (bookId) => reviews?.[bookId] || [];
+
+      /**************** AUTH ****************/
+      const welcome = (u) => {
+        if (!u) return;
+        if (u.type === "admin") showToast({type:"info", emoji:"👨‍💼", title:"Welcome Admin!", message:"Dashboard is ready ✅"});
+        else showToast({type:"success", emoji:"🎉", title:`Welcome, ${u.name}!`, message:"Beautiful day for reading 📚✨"});
+      };
+      const goodbye = (u) => {
+        if (!u) return;
+        if (u.type === "admin") showToast({type:"info", emoji:"👋", title:"Logged out!", message:"See you again, Admin ✅"});
+        else showToast({type:"success", emoji:"🌸", title:`Goodbye, ${u.name}!`, message:"Stay inspired. Come again! 💚"});
+      };
+
+      const handleLogin = () => {
+        if (userType === "admin") {
+          if (loginData.username.trim() === "sami" && loginData.password === "31") {
+            const admin = { type:"admin", name: loginData.username.trim() || "Admin" };
+            setCurrentUser(admin);
+            welcome(admin);
+            return;
+          }
+          alert("Invalid admin credentials!");
+          return;
+        }
+        const email = loginData.email.trim().toLowerCase();
+        const pass = loginData.password;
+        if (!email || !pass) return alert("Email and password required!");
+        const found = customers.find(c => c.email === email);
+        if (!found || found.password !== pass) return alert("Invalid email or password!");
+        setCurrentUser(found);
+        welcome(found);
+      };
+
+      const handleRegister = () => {
+        const email = registerData.email.trim().toLowerCase();
+        const pass = registerData.password;
+        const name = registerData.name.trim();
+        if (!email || !pass || !name) return alert("Please fill all fields!");
+        if (!email.includes("@")) return alert("Please enter a valid email!");
+        if (customers.some(c => c.email === email)) return alert("Email already registered. Please login!");
+        const newCustomer = {
+          id: Date.now(),
+          email,
+          password: pass,
+          name,
+          image: "https://api.dicebear.com/7.x/avataaars/svg?seed=" + encodeURIComponent(email),
+          wishlist: []
+        };
+        setCustomers(prev => [...prev, newCustomer]);
+        setCurrentUser(newCustomer);
+        setRegisterData({ email:"", password:"", name:"" });
+        setShowRegister(false);
+        welcome(newCustomer);
+      };
+
+      const handleLogout = () => {
+        goodbye(currentUser);
+        setCurrentUser(null);
+        setUserType(null);
+        setLoginData({ username:"", password:"", email:"" });
+        setShowRegister(false);
+        setCart([]);
+        setProfileOpen(false);
+        setConfirmCheckoutOpen(false);
+        setPaymentOpen(false);
+        setInvoiceOpen(false);
+        if (readerUrl) URL.revokeObjectURL(readerUrl);
+        setReaderOpen(false);
+        setReaderUrl("");
+        setReaderBook(null);
+      };
+
+      /**************** CART ****************/
+      const addToCart = (book) => {
+        if (!book.hasPdf) return; // Coming Soon -> cannot add
+        setCart(prev => {
+          const found = prev.find(it => it.bookId === book.id);
+          if (found) return prev.map(it => it.bookId === book.id ? {...it, qty: it.qty + 1} : it);
+          return [...prev, { bookId: book.id, title: book.title, price: book.price, qty: 1, image: book.image }];
+        });
+        showToast({type:"success", emoji:"🛒", title:"Added to cart", message: book.title});
+      };
+
+      const changeQty = (bookId, delta) => {
+        setCart(prev => prev
+          .map(it => it.bookId === bookId ? {...it, qty: it.qty + delta} : it)
+          .filter(it => it.qty > 0)
+        );
+      };
+
+      const proceedToPayment = () => { setConfirmCheckoutOpen(false); setPaymentOpen(true); };
+
+      const payNow = () => {
+        if (!customer) return;
+        const card = cardNumber.replace(/\s+/g,"");
+        if (card.length < 12) return alert("Enter valid card number (min 12 digits).");
+        if (cart.length === 0) return;
+
+        const total = cart.reduce((s,it)=>s + it.price*it.qty, 0);
+        const order = {
+          id: Date.now(),
+          createdAt: new Date().toISOString(),
+          customerId: customer.id,
+          customerEmail: customer.email,
+          customerName: customer.name,
+          items: cart.map(it => ({...it})),
+          total,
+          payment: { method:"Card", last4: card.slice(-4) }
+        };
+
+        setOrders(prev => [order, ...prev]);
+        setCart([]);
+        setPaymentOpen(false);
+        setCardNumber("");
+
+        const firstBook = order.items[0]?.title || "your book";
+        showToast({ type:"success", emoji:"✅", title:"Payment Successful!", message:`Thank you for purchasing "${firstBook}" ✨` });
+
+        setInvoiceOrder(order);
+        setInvoiceOpen(true);
+      };
+
+      /**************** WISHLIST ****************/
+      const toggleWishlist = (bookId) => {
+        if (!customer) return;
+        const updated = {
+          ...customer,
+          wishlist: customer.wishlist?.includes(bookId)
+            ? customer.wishlist.filter(x => x !== bookId)
+            : [...(customer.wishlist || []), bookId]
+        };
+        setCustomers(prev => prev.map(c => c.id === customer.id ? updated : c));
+        setCurrentUser(updated);
+      };
+
+      /**************** RATINGS ****************/
+      const setMyRating = (bookId, value) => {
+        if (!customer) return;
+        setRatings(prev => {
+          const br = prev[bookId] || {};
+          return { ...prev, [bookId]: { ...br, [customer.id]: value } };
+        });
+        showToast({type:"success", emoji:"⭐", title:"Rating saved", message:`You rated ${value} star(s).`});
+      };
+
+      /**************** REVIEWS ****************/
+      const addReview = (bookId, text) => {
+        if (!customer) return;
+        const t = (text || "").trim();
+        if (!t) return alert("Write your review first!");
+        const r = { id: Date.now(), userId: customer.id, userName: customer.name, text: t, createdAt: new Date().toISOString() };
+        setReviews(prev => {
+          const arr = prev[bookId] || [];
+          return { ...prev, [bookId]: [r, ...arr] };
+        });
+        showToast({type:"success", emoji:"💬", title:"Review posted", message:"Thanks for your feedback!"});
+      };
+
+      const deleteReviewAdmin = (bookId, reviewId) => {
+        if (!window.confirm("Delete this review?")) return;
+        setReviews(prev => {
+          const arr = prev[bookId] || [];
+          return { ...prev, [bookId]: arr.filter(x => x.id !== reviewId) };
+        });
+        showToast({type:"info", emoji:"🧹", title:"Review deleted", message:"Removed successfully."});
+      };
+
+      /**************** PASSWORD UPDATE ****************/
+      const updatePassword = () => {
+        if (!customer) return;
+        const { current, next, confirm } = passForm;
+        if (!current || !next || !confirm) return alert("Fill all password fields!");
+        if (current !== customer.password) return alert("Current password is wrong!");
+        if (next.length < 4) return alert("New password should be at least 4 characters!");
+        if (next !== confirm) return alert("New password and confirm password not same!");
+
+        const updated = { ...customer, password: next };
+        setCustomers(prev => prev.map(c => c.id === customer.id ? updated : c));
+        setCurrentUser(updated);
+        setPassForm({ current:"", next:"", confirm:"" });
+        setPasswordModalOpen(false);
+        showToast({type:"success", emoji:"🔐", title:"Password Updated", message:"Your password has been changed ✅"});
+      };
+
+      /**************** READER + PROGRESS ****************/
+      const openReader = async (book) => {
+        if (!customer) return;
+        if (!myPurchasedBookIds.has(book.id)) return alert("You need to buy this book first!");
+        if (!book.hasPdf) return alert("PDF is coming soon for this book.");
+
+        const blob = await idbGet("bookpdf_" + book.id);
+        if (!blob) return alert("PDF not found (Admin must upload PDF again).");
+
+        const url = blobToURL(blob);
+        setReaderUrl(url);
+        setReaderBook(book);
+
+        const savedPage = progress?.[customer.id]?.[book.id]?.page || 1;
+        setReaderPage(savedPage);
+        setReaderOpen(true);
+      };
+
+      const saveProgress = () => {
+        if (!customer || !readerBook) return;
+        const uid = customer.id;
+        const bid = readerBook.id;
+        const pg = Math.max(1, Number(readerPage || 1));
+
+        setProgress(prev => {
+          const userProg = prev[uid] || {};
+          return {
+            ...prev,
+            [uid]: {
+              ...userProg,
+              [bid]: { page: pg, updatedAt: new Date().toISOString() }
+            }
+          };
+        });
+        showToast({type:"success", emoji:"📌", title:"Progress Saved", message:`Saved at page ${pg}`});
+      };
+
+      /**************** ADMIN: ADD/EDIT BOOK + PDF ****************/
+      const pickNewPdf = async (file) => {
+        if (!file) return;
+        if (file.type !== "application/pdf") return alert("Only PDF file allowed!");
+        await idbSet("temp_new_pdf", file);
+        setNewBook(prev => ({...prev, hasPdf:true, pdfName:file.name}));
+        showToast({type:"success", emoji:"📄", title:"PDF Selected", message:file.name});
+      };
+
+      const addBookAdmin = async () => {
+        const t = newBook.title.trim();
+        const a = newBook.author.trim();
+        const p = Number(newBook.price);
+        if (!t || !a || !p || p <= 0) return alert("Title, Author, Price are required!");
+
+        const id = Date.now();
+        const book = {
+          id,
+          title: t,
+          author: a,
+          price: p,
+          category: newBook.category,
+          image: newBook.image.trim() || "https://images.unsplash.com/photo-1543002588-bfa74002ed7e?w=900&h=600&fit=crop",
+          hasPdf: newBook.hasPdf,
+          pdfName: newBook.pdfName || ""
+        };
+
+        if (newBook.hasPdf) {
+          const tempBlob = await idbGet("temp_new_pdf");
+          if (tempBlob) {
+            await idbSet("bookpdf_" + id, tempBlob);
+            await idbDelete("temp_new_pdf");
+          }
+        }
+
+        setBooks(prev => [book, ...prev]);
+        setNewBook({ title:"", author:"", price:"", category:"story", image:"", hasPdf:false, pdfName:"" });
+        setShowAddBook(false);
+
+        showToast({type:"success", emoji:"✅", title:"Book Added!", message:`"${book.title}" added successfully.`});
+      };
+
+      const openEdit = (book) => {
+        setEditBook({...book});
+        setEditPdfName(book.pdfName || "");
+        setEditOpen(true);
+      };
+
+      const pickEditPdf = async (file) => {
+        if (!file) return;
+        if (file.type !== "application/pdf") return alert("Only PDF file allowed!");
+        await idbSet("temp_edit_pdf", file);
+        setEditPdfName(file.name);
+        showToast({type:"success", emoji:"📄", title:"New PDF Selected", message:file.name});
+      };
+
+      const updateBookAdmin = async () => {
+        if (!editBook) return;
+        const t = editBook.title.trim();
+        const a = editBook.author.trim();
+        const p = Number(editBook.price);
+        if (!t || !a || !p || p <= 0) return alert("Title, Author, Price are required!");
+
+        const updated = {
+          ...editBook,
+          title: t,
+          author: a,
+          price: p,
+          image: editBook.image?.trim() || "https://images.unsplash.com/photo-1543002588-bfa74002ed7e?w=900&h=600&fit=crop",
+          hasPdf: Boolean(editPdfName),
+          pdfName: editPdfName || ""
+        };
+
+        const temp = await idbGet("temp_edit_pdf");
+        if (temp) {
+          await idbSet("bookpdf_" + updated.id, temp);
+          await idbDelete("temp_edit_pdf");
+        }
+
+        setBooks(prev => prev.map(b => b.id === updated.id ? updated : b));
+        setEditOpen(false);
+        setEditBook(null);
+        setEditPdfName("");
+        showToast({type:"success", emoji:"✅", title:"Book Updated", message:`"${updated.title}" updated successfully.`});
+      };
+
+      const deleteBookAdmin = async (id) => {
+        if (!window.confirm("Are you sure you want to delete this book?")) return;
+        setBooks(prev => prev.filter(b => b.id !== id));
+        await idbDelete("bookpdf_" + id);
+        showToast({type:"info", emoji:"🗑️", title:"Book Deleted", message:"Book removed successfully."});
+      };
+
+      /**************** ADMIN ANALYTICS ****************/
+      const analytics = useMemo(() => {
+        const totalSales = orders.reduce((s,o)=>s+o.total, 0);
+        const soldCountByBookId = {};
+        const salesByCustomer = {};
+
+        orders.forEach(o => {
+          salesByCustomer[o.customerId] = (salesByCustomer[o.customerId] || 0) + o.total;
+          o.items.forEach(it => {
+            soldCountByBookId[it.bookId] = (soldCountByBookId[it.bookId] || 0) + it.qty;
+          });
+        });
+
+        let mostSoldBookId = null, mostSoldQty = 0;
+        for (const [bid, qty] of Object.entries(soldCountByBookId)) {
+          if (qty > mostSoldQty) { mostSoldQty = qty; mostSoldBookId = Number(bid); }
+        }
+
+        let topCustomerId = null, topCustomerSales = 0;
+        for (const [cid, val] of Object.entries(salesByCustomer)) {
+          if (val > topCustomerSales) { topCustomerSales = val; topCustomerId = Number(cid); }
+        }
+
+        const mostSoldBook = books.find(b => b.id === mostSoldBookId) || null;
+        const topCustomer = customers.find(c => c.id === topCustomerId) || null;
+
+        return { totalSales, mostSoldBook, mostSoldQty, topCustomer, topCustomerSales };
+      }, [orders, books, customers]);
+
+      /**************** RENDER: LOGIN PAGE ****************/
+      if (!currentUser) {
+        return (
+          <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
+            <Toast toast={toast} onClose={() => setToast(p=>({...p,open:false}))} />
+
+            <button
+              onClick={() => setUserType("admin")}
+              className="fixed top-4 right-4 bg-indigo-600 text-white px-6 py-2 rounded-lg font-semibold hover:bg-indigo-700 transition shadow-lg z-10"
+            >
+              👨‍💼 Admin Login
+            </button>
+
+            <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-md">
+              <div className="text-center mb-8">
+                <div className="text-6xl mb-4">📚</div>
+                <h1 className="text-3xl font-bold text-gray-800">Book Shop</h1>
+                <p className="text-gray-600 mt-2">Book Shop + PDF Reading</p>
+              </div>
+
+              {userType === "admin" ? (
+                <div className="space-y-4">
+                  <h2 className="text-xl font-bold text-center text-indigo-600">Admin Login</h2>
+
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-700 mb-1">Username</label>
+                    <input
+                      className="w-full px-4 py-2 border rounded-lg"
+                      value={loginData.username}
+                      onChange={(e)=>setLoginData({...loginData, username:e.target.value})}
+                      placeholder="Enter username"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-700 mb-1">Password</label>
+                    <input
+                      className="w-full px-4 py-2 border rounded-lg"
+                      value={loginData.password}
+                      onChange={(e)=>setLoginData({...loginData, password:e.target.value})}
+                      type="password"
+                      placeholder="Enter password"
+                    />
+                  </div>
+
+                  <button onClick={handleLogin} className="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-3 rounded-lg font-semibold">
+                    Login as Admin
+                  </button>
+
+                  <button onClick={()=>setUserType(null)} className="w-full bg-gray-200 hover:bg-gray-300 py-2 rounded-lg font-semibold">
+                    Back to Customer Login
+                  </button>
+                </div>
+              ) : showRegister ? (
+                <div className="space-y-4">
+                  <h2 className="text-xl font-bold text-center text-emerald-600">Create Account</h2>
+
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-700 mb-1">Email</label>
+                    <input
+                      className="w-full px-4 py-2 border rounded-lg"
+                      value={registerData.email}
+                      onChange={(e)=>setRegisterData({...registerData, email:e.target.value})}
+                      placeholder="your@gmail.com"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-700 mb-1">Full Name</label>
+                    <input
+                      className="w-full px-4 py-2 border rounded-lg"
+                      value={registerData.name}
+                      onChange={(e)=>setRegisterData({...registerData, name:e.target.value})}
+                      placeholder="Your Name"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-700 mb-1">Password</label>
+                    <input
+                      className="w-full px-4 py-2 border rounded-lg"
+                      value={registerData.password}
+                      onChange={(e)=>setRegisterData({...registerData, password:e.target.value})}
+                      type="password"
+                      placeholder="Create password"
+                    />
+                  </div>
+
+                  <button onClick={handleRegister} className="w-full bg-emerald-600 hover:bg-emerald-700 text-white py-3 rounded-lg font-semibold">
+                    Register
+                  </button>
+
+                  <button onClick={()=>setShowRegister(false)} className="w-full bg-gray-200 hover:bg-gray-300 py-2 rounded-lg font-semibold">
+                    Back to Login
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <h2 className="text-xl font-bold text-center text-emerald-600">Customer Login</h2>
+
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-700 mb-1">Gmail</label>
+                    <input
+                      className="w-full px-4 py-2 border rounded-lg"
+                      value={loginData.email}
+                      onChange={(e)=>setLoginData({...loginData, email:e.target.value})}
+                      placeholder="your@gmail.com"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-700 mb-1">Password</label>
+                    <input
+                      className="w-full px-4 py-2 border rounded-lg"
+                      value={loginData.password}
+                      onChange={(e)=>setLoginData({...loginData, password:e.target.value})}
+                      type="password"
+                      placeholder="Enter password"
+                    />
+                  </div>
+
+                  <button onClick={handleLogin} className="w-full bg-emerald-600 hover:bg-emerald-700 text-white py-3 rounded-lg font-semibold">
+                    Login
+                  </button>
+
+                  <div className="text-center text-sm text-gray-600">
+                    Don’t have an account?{" "}
+                    <button onClick={()=>setShowRegister(true)} className="text-emerald-700 font-bold hover:underline">
+                      Register here
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      }
+
+      /**************** RENDER: ADMIN ****************/
+      if (currentUser.type === "admin") {
+        const flatReviews = Object.entries(reviews || {}).flatMap(([bookId, arr]) => (arr || []).map(r => ({...r, bookId:Number(bookId)})));
+
+        return (
+          <div className="min-h-screen bg-gray-50">
+            <Toast toast={toast} onClose={() => setToast(p=>({...p,open:false}))} />
+
+            <Modal open={editOpen} onClose={()=>{setEditOpen(false); setEditBook(null); setEditPdfName("");}} title="✏️ Edit Book" subtitle="Update info and upload/replace PDF (optional)">
+              {editBook && (
+                <div className="space-y-4">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <input className="px-4 py-2 border rounded-lg" value={editBook.title} onChange={(e)=>setEditBook({...editBook, title:e.target.value})} placeholder="Title"/>
+                    <input className="px-4 py-2 border rounded-lg" value={editBook.author} onChange={(e)=>setEditBook({...editBook, author:e.target.value})} placeholder="Author"/>
+                    <input className="px-4 py-2 border rounded-lg" value={editBook.price} onChange={(e)=>setEditBook({...editBook, price:e.target.value})} type="number" placeholder="Price"/>
+                    <select className="px-4 py-2 border rounded-lg" value={editBook.category} onChange={(e)=>setEditBook({...editBook, category:e.target.value})}>
+                      <option value="story">Story</option>
+                      <option value="legendary">Legendary</option>
+                      <option value="famous">Famous</option>
+                    </select>
+                    <input className="px-4 py-2 border rounded-lg md:col-span-2" value={editBook.image} onChange={(e)=>setEditBook({...editBook, image:e.target.value})} placeholder="Image URL"/>
+                  </div>
+
+                  <div className="border rounded-xl p-4">
+                    <p className="font-semibold text-gray-800">PDF</p>
+                    <p className="text-sm text-gray-600 mt-1">{editPdfName ? `Current: ${editPdfName}` : "No PDF (Coming soon)"}</p>
+                    <input className="mt-3" type="file" accept="application/pdf" onChange={(e)=>pickEditPdf(e.target.files?.[0])}/>
+                  </div>
+
+                  <button onClick={updateBookAdmin} className="w-full bg-emerald-600 hover:bg-emerald-700 text-white py-3 rounded-lg font-semibold">
+                    ✅ Update Book
+                  </button>
+                </div>
+              )}
+            </Modal>
+
+            <div className="bg-indigo-600 text-white p-4 shadow-lg">
+              <div className="max-w-7xl mx-auto flex justify-between items-center flex-wrap gap-3">
+                <div className="flex items-center gap-3">
+                  <span className="text-4xl">📚</span>
+                  <div>
+                    <h1 className="text-2xl font-bold">Admin Dashboard</h1>
+                    <p className="text-indigo-200">Welcome, {currentUser.name}</p>
+                  </div>
+                </div>
+                <button onClick={handleLogout} className="bg-indigo-800 px-4 py-2 rounded-lg hover:bg-indigo-900 font-semibold">
+                  🚪 Logout
+                </button>
+              </div>
+            </div>
+
+            <div className="max-w-7xl mx-auto p-6 space-y-6">
+              <div className="bg-white rounded-2xl shadow p-5">
+                <h2 className="text-xl font-bold mb-4">📊 Sales Analytics</h2>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="border rounded-2xl p-4">
+                    <p className="text-sm text-gray-500">Total Sales</p>
+                    <p className="text-2xl font-extrabold text-emerald-700">{money(analytics.totalSales)}</p>
+                  </div>
+                  <div className="border rounded-2xl p-4">
+                    <p className="text-sm text-gray-500">Most Sold Book</p>
+                    <p className="font-bold">{analytics.mostSoldBook ? analytics.mostSoldBook.title : "—"}</p>
+                    <p className="text-sm text-gray-600">Qty: <b>{analytics.mostSoldQty || 0}</b></p>
+                  </div>
+                  <div className="border rounded-2xl p-4">
+                    <p className="text-sm text-gray-500">Top Customer</p>
+                    <p className="font-bold">{analytics.topCustomer ? analytics.topCustomer.name : "—"}</p>
+                    <p className="text-sm text-gray-600">Spent: <b>{money(analytics.topCustomerSales || 0)}</b></p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="bg-white rounded-2xl shadow p-5">
+                <div className="flex justify-between items-center flex-wrap gap-2">
+                  <h2 className="text-xl font-bold">📚 Manage Books</h2>
+                  <button onClick={()=>setShowAddBook(true)} className="bg-emerald-600 text-white px-4 py-2 rounded-lg hover:bg-emerald-700 font-semibold">
+                    ➕ Add Book
+                  </button>
+                </div>
+
+                {showAddBook && (
+                  <div className="mt-4 border rounded-2xl p-4">
+                    <h3 className="font-bold mb-3">Add New Book (PDF supported)</h3>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <input className="px-4 py-2 border rounded-lg" placeholder="Title" value={newBook.title} onChange={(e)=>setNewBook({...newBook, title:e.target.value})}/>
+                      <input className="px-4 py-2 border rounded-lg" placeholder="Author" value={newBook.author} onChange={(e)=>setNewBook({...newBook, author:e.target.value})}/>
+                      <input className="px-4 py-2 border rounded-lg" placeholder="Price" type="number" value={newBook.price} onChange={(e)=>setNewBook({...newBook, price:e.target.value})}/>
+                      <select className="px-4 py-2 border rounded-lg" value={newBook.category} onChange={(e)=>setNewBook({...newBook, category:e.target.value})}>
+                        <option value="story">Story</option>
+                        <option value="legendary">Legendary</option>
+                        <option value="famous">Famous</option>
+                      </select>
+                      <input className="px-4 py-2 border rounded-lg md:col-span-2" placeholder="Image URL (optional)" value={newBook.image} onChange={(e)=>setNewBook({...newBook, image:e.target.value})}/>
+                      <div className="md:col-span-2 border rounded-xl p-4">
+                        <p className="font-semibold text-gray-800">Upload PDF</p>
+                        <input className="mt-2" type="file" accept="application/pdf" onChange={(e)=>pickNewPdf(e.target.files?.[0])}/>
+                        <p className="text-xs text-gray-600 mt-2">{newBook.hasPdf ? `Selected: ${newBook.pdfName}` : "No PDF selected (book will show Coming Soon)"}</p>
+                      </div>
+                    </div>
+
+                    <div className="flex gap-2 mt-4">
+                      <button onClick={addBookAdmin} className="bg-emerald-600 text-white px-6 py-2 rounded-lg hover:bg-emerald-700 font-semibold">✅ Save Book</button>
+                      <button onClick={()=>{setShowAddBook(false); setNewBook({ title:"", author:"", price:"", category:"story", image:"", hasPdf:false, pdfName:"" });}} className="bg-gray-200 px-6 py-2 rounded-lg hover:bg-gray-300 font-semibold">Cancel</button>
+                    </div>
+                  </div>
+                )}
+
+                <div className="mt-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {books.map(b => (
+                    <div key={b.id} className="border rounded-2xl overflow-hidden bg-white">
+                      <img src={b.image} className="w-full h-40 object-cover" alt={b.title}/>
+                      <div className="p-4 space-y-2">
+                        <div className="flex justify-between items-start gap-2">
+                          <div>
+                            <p className="font-bold">{b.title}</p>
+                            <p className="text-sm text-gray-600">{b.author}</p>
+                          </div>
+                          <Badge tone={b.hasPdf ? "green" : "yellow"}>{b.hasPdf ? "PDF ✅" : "Coming Soon"}</Badge>
+                        </div>
+                        <p className="font-bold text-emerald-700">{money(b.price)}</p>
+                        <p className="text-xs text-gray-600">{b.hasPdf ? `PDF: ${b.pdfName}` : "No PDF uploaded"}</p>
+
+                        <div className="flex gap-2 pt-2">
+                          <button onClick={()=>openEdit(b)} className="flex-1 bg-indigo-600 text-white px-3 py-2 rounded-lg hover:bg-indigo-700 font-semibold">✏️ Edit</button>
+                          <button onClick={()=>deleteBookAdmin(b.id)} className="flex-1 bg-rose-600 text-white px-3 py-2 rounded-lg hover:bg-rose-700 font-semibold">🗑️ Delete</button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="bg-white rounded-2xl shadow p-5">
+                <h2 className="text-xl font-bold mb-3">🧾 Orders (Who bought which book)</h2>
+                {orders.length === 0 ? (
+                  <p className="text-gray-500">No orders yet.</p>
+                ) : (
+                  <div className="space-y-3">
+                    {orders.map(o => (
+                      <div key={o.id} className="border rounded-2xl p-4">
+                        <div className="flex justify-between flex-wrap gap-2">
+                          <div>
+                            <p className="font-bold">{o.customerName} <span className="font-normal text-gray-500">({o.customerEmail})</span></p>
+                            <p className="text-xs text-gray-500">{new Date(o.createdAt).toLocaleString()} | Order ID: {o.id}</p>
+                          </div>
+                          <div className="text-right">
+                            <p className="font-bold text-emerald-700">{money(o.total)}</p>
+                            <p className="text-xs text-gray-500">Card **** {o.payment?.last4 || "----"}</p>
+                          </div>
+                        </div>
+                        <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-2">
+                          {o.items.map(it => (
+                            <div key={it.bookId} className="border rounded-xl p-3 text-sm flex items-center justify-between">
+                              <div>
+                                <p className="font-semibold">{it.title}</p>
+                                <p className="text-gray-600">Qty: {it.qty}</p>
+                              </div>
+                              <p className="font-bold text-gray-800">{money(it.price * it.qty)}</p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="bg-white rounded-2xl shadow p-5">
+                <h2 className="text-xl font-bold mb-3">🧹 Review Moderation</h2>
+                {flatReviews.length === 0 ? (
+                  <p className="text-gray-500">No reviews posted.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {flatReviews.slice(0, 12).map(r => {
+                      const book = books.find(b => b.id === r.bookId);
+                      return (
+                        <div key={r.id} className="border rounded-xl p-3 flex items-start justify-between gap-3">
+                          <div>
+                            <p className="font-semibold">{r.userName} <span className="text-xs text-gray-500">({new Date(r.createdAt).toLocaleString()})</span></p>
+                            <p className="text-sm text-gray-700 mt-1">{r.text}</p>
+                            <p className="text-xs text-gray-500 mt-1">Book: <b>{book ? book.title : "Unknown"}</b></p>
+                          </div>
+                          <button onClick={()=>deleteReviewAdmin(r.bookId, r.id)} className="bg-rose-600 text-white px-3 py-2 rounded-lg hover:bg-rose-700 font-semibold">Delete</button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      /**************** RENDER: CUSTOMER ****************/
+      // customer UI modals + page
+      return (
+        <div className="min-h-screen bg-gray-50 pb-28">
+          <Toast toast={toast} onClose={() => setToast(p=>({...p,open:false}))} />
+
+          {/* Profile */}
+          <Modal open={profileOpen} onClose={()=>setProfileOpen(false)} title="👤 My Profile" subtitle="Wishlist • Orders • Password • Library" wide>
+            {customer && (
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+                <div className="border rounded-2xl p-4">
+                  <div className="flex items-center gap-3">
+                    <img src={customer.image} className="w-16 h-16 rounded-full border" alt="avatar"/>
+                    <div>
+                      <p className="font-bold text-lg">{customer.name}</p>
+                      <p className="text-sm text-gray-600">{customer.email}</p>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 space-y-2">
+                    <button onClick={()=>setPasswordModalOpen(true)} className="w-full bg-indigo-600 text-white py-2 rounded-lg hover:bg-indigo-700 font-semibold">
+                      🔐 Update Password
+                    </button>
+                  </div>
+
+                  <div className="mt-4 border rounded-xl p-3">
+                    <p className="font-bold">❤️ Wishlist</p>
+                    <p className="text-sm text-gray-600">{customer.wishlist?.length || 0} book(s)</p>
+                    <div className="mt-2 space-y-2 max-h-56 overflow-auto">
+                      {(customer.wishlist || []).length === 0 ? (
+                        <p className="text-sm text-gray-500">No wishlist items yet.</p>
+                      ) : (
+                        customer.wishlist.map(id => {
+                          const b = books.find(x => x.id === id);
+                          if (!b) return null;
+                          return (
+                            <div key={id} className="flex items-center justify-between border rounded-lg p-2">
+                              <div>
+                                <p className="font-semibold text-sm">{b.title}</p>
+                                <p className="text-xs text-gray-500">{money(b.price)}</p>
+                              </div>
+                              <button onClick={()=>toggleWishlist(id)} className="text-rose-600 font-bold">Remove</button>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="border rounded-2xl p-4">
+                  <p className="font-bold text-lg mb-2">🧾 Purchase History</p>
+                  {myOrders.length === 0 ? (
+                    <p className="text-sm text-gray-500">No purchases yet.</p>
+                  ) : (
+                    <div className="space-y-3 max-h-[430px] overflow-auto pr-1">
+                      {myOrders.map(o => (
+                        <div key={o.id} className="border rounded-xl p-3">
+                          <div className="flex justify-between items-start">
+                            <div>
+                              <p className="text-xs text-gray-500">{new Date(o.createdAt).toLocaleString()}</p>
+                              <p className="text-sm font-bold">Order #{o.id}</p>
+                            </div>
+                            <p className="font-bold text-emerald-700">{money(o.total)}</p>
+                          </div>
+                          <div className="mt-2 space-y-2">
+                            {o.items.map(it => (
+                              <div key={it.bookId} className="flex items-center justify-between border rounded-lg p-2">
+                                <div>
+                                  <p className="font-semibold text-sm">{it.title}</p>
+                                  <p className="text-xs text-gray-500">Qty {it.qty}</p>
+                                </div>
+                                <p className="text-sm font-bold">{money(it.price * it.qty)}</p>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="border rounded-2xl p-4">
+                  <p className="font-bold text-lg mb-2">📚 My Library</p>
+                  <p className="text-sm text-gray-600 mb-3">Purchased books appear here. If PDF is missing, it shows “Coming Soon”.</p>
+
+                  <div className="space-y-2 max-h-[430px] overflow-auto pr-1">
+                    {books
+                      .filter(b => myPurchasedBookIds.has(b.id))
+                      .map(b => {
+                        const pg = progress?.[customer.id]?.[b.id]?.page || 1;
+                        return (
+                          <div key={b.id} className="border rounded-xl p-3 flex items-start justify-between gap-3">
+                            <div>
+                              <p className="font-semibold">{b.title}</p>
+                              <p className="text-xs text-gray-500">{b.hasPdf ? `PDF: ${b.pdfName}` : "PDF: Coming Soon"}</p>
+                              <p className="text-xs text-gray-500">Saved page: <b>{pg}</b></p>
+                            </div>
+                            <button
+                              onClick={()=>openReader(b)}
+                              className={`px-3 py-2 rounded-lg font-semibold ${b.hasPdf ? "bg-emerald-600 text-white hover:bg-emerald-700" : "bg-gray-200 text-gray-600 cursor-not-allowed"}`}
+                              disabled={!b.hasPdf}
+                            >
+                              📖 Read
+                            </button>
+                          </div>
+                        );
+                      })}
+
+                    {books.filter(b => myPurchasedBookIds.has(b.id)).length === 0 && (
+                      <p className="text-sm text-gray-500">No purchased books yet.</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+          </Modal>
+
+          {/* Update Password */}
+          <Modal open={passwordModalOpen} onClose={()=>setPasswordModalOpen(false)} title="🔐 Update Password" subtitle="Current → New → Confirm">
+            <div className="space-y-3">
+              <input className="w-full px-4 py-2 border rounded-lg" type="password" placeholder="Current Password"
+                value={passForm.current} onChange={(e)=>setPassForm({...passForm, current:e.target.value})}/>
+              <input className="w-full px-4 py-2 border rounded-lg" type="password" placeholder="New Password"
+                value={passForm.next} onChange={(e)=>setPassForm({...passForm, next:e.target.value})}/>
+              <input className="w-full px-4 py-2 border rounded-lg" type="password" placeholder="Confirm New Password"
+                value={passForm.confirm} onChange={(e)=>setPassForm({...passForm, confirm:e.target.value})}/>
+              <button onClick={updatePassword} className="w-full bg-indigo-600 text-white py-3 rounded-lg hover:bg-indigo-700 font-semibold">
+                ✅ Update Password
+              </button>
+            </div>
+          </Modal>
+
+          {/* Confirm Checkout */}
+          <Modal open={confirmCheckoutOpen} onClose={()=>setConfirmCheckoutOpen(false)} title="✅ Confirm Checkout" subtitle="Are you sure you want to proceed?">
+            <div className="space-y-3">
+              <p className="text-gray-700">Total: <span className="font-bold text-emerald-700">{money(cartTotal)}</span></p>
+              <div className="flex gap-2">
+                <button onClick={proceedToPayment} className="flex-1 px-4 py-3 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 font-semibold">Yes</button>
+                <button onClick={()=>setConfirmCheckoutOpen(false)} className="flex-1 px-4 py-3 rounded-lg bg-gray-200 hover:bg-gray-300 font-semibold">No</button>
+              </div>
+            </div>
+          </Modal>
+
+          {/* Payment */}
+          <Modal open={paymentOpen} onClose={()=>setPaymentOpen(false)} title="💳 Payment (Card)" subtitle="Enter card number to complete purchase">
+            <div className="space-y-3">
+              <input className="w-full px-4 py-2 border rounded-lg" placeholder="Card Number"
+                value={cardNumber} onChange={(e)=>setCardNumber(e.target.value)} />
+              <button onClick={payNow} className="w-full px-5 py-3 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 font-semibold">
+                Pay Now
+              </button>
+              <p className="text-xs text-gray-500">Demo only (no real payment gateway).</p>
+            </div>
+          </Modal>
+
+          {/* Invoice */}
+          <Modal open={invoiceOpen} onClose={()=>setInvoiceOpen(false)} title="🧾 Invoice / Receipt" subtitle="You can print from browser">
+            {invoiceOrder ? (
+              <div className="border rounded-2xl p-4 space-y-2">
+                <p className="font-bold text-lg">Order ID: {invoiceOrder.id}</p>
+                <p className="text-sm text-gray-600">Date: {new Date(invoiceOrder.createdAt).toLocaleString()}</p>
+                <p className="text-sm text-gray-600">Customer: <b>{invoiceOrder.customerName}</b></p>
+                <div className="border rounded-xl p-3 mt-3 space-y-2">
+                  {invoiceOrder.items.map(it => (
+                    <div key={it.bookId} className="flex items-center justify-between text-sm">
+                      <span>{it.title} × {it.qty}</span>
+                      <b>{money(it.price * it.qty)}</b>
+                    </div>
+                  ))}
+                  <div className="flex items-center justify-between border-t pt-2">
+                    <span className="font-bold">Total</span>
+                    <span className="font-extrabold text-emerald-700">{money(invoiceOrder.total)}</span>
+                  </div>
+                </div>
+                <button onClick={()=>window.print()} className="mt-2 px-4 py-2 rounded-lg bg-gray-900 text-white hover:bg-black font-semibold">
+                  🖨 Print Invoice
+                </button>
+              </div>
+            ) : <p className="text-gray-600">No invoice.</p>}
+          </Modal>
+
+          {/* Reader */}
+          <Modal
+            open={readerOpen}
+            onClose={()=>{
+              setReaderOpen(false);
+              if (readerUrl) URL.revokeObjectURL(readerUrl);
+              setReaderUrl("");
+            }}
+            title={`📖 Reading: ${readerBook?.title || ""}`}
+            subtitle="PDF Viewer (progress tracker below)"
+            wide
+          >
+            <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
+              <div className="lg:col-span-3">
+                {!readerUrl ? (
+                  <p className="text-gray-600">Loading PDF…</p>
+                ) : (
+                  <div className="h-[75vh] border rounded-2xl overflow-hidden">
+                    <iframe title="Book PDF" src={readerUrl} className="w-full h-full"></iframe>
+                  </div>
+                )}
+              </div>
+
+              <div className="lg:col-span-1 border rounded-2xl p-4 space-y-3">
+                <p className="font-bold">📌 Reading Progress</p>
+                <p className="text-sm text-gray-600">
+                  PDF pages can’t be detected automatically inside iframe, so save page manually.
+                </p>
+
+                <div>
+                  <label className="text-sm font-semibold text-gray-700">Current page</label>
+                  <input className="mt-1 w-full px-4 py-2 border rounded-lg"
+                    type="number" min="1" value={readerPage} onChange={(e)=>setReaderPage(e.target.value)} />
+                </div>
+
+                <button onClick={saveProgress} className="w-full bg-emerald-600 text-white py-2 rounded-lg hover:bg-emerald-700 font-semibold">
+                  ✅ Save Progress
+                </button>
+              </div>
+            </div>
+          </Modal>
+
+          {/* Topbar */}
+          <div className="bg-emerald-600 text-white p-4 shadow-lg">
+            <div className="max-w-7xl mx-auto flex justify-between items-center flex-wrap gap-3">
+              <div className="flex items-center gap-3">
+                <span className="text-4xl">📚</span>
+                <div>
+                  <h1 className="text-2xl font-bold">Book Shop</h1>
+                  <p className="text-emerald-100 text-sm">Welcome, {customer?.name}</p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button onClick={()=>setProfileOpen(true)} className="bg-emerald-700 px-4 py-2 rounded-lg hover:bg-emerald-800 font-semibold">
+                  👤 Profile
+                </button>
+                <button onClick={handleLogout} className="bg-emerald-700 px-4 py-2 rounded-lg hover:bg-emerald-800 font-semibold">
+                  🚪 Logout
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Categories */}
+          <div className="max-w-7xl mx-auto p-6">
+            <div className="flex gap-2 mb-6 overflow-x-auto pb-2">
+              {CATEGORIES.map(cat => (
+                <button
+                  key={cat.id}
+                  onClick={()=>setSelectedCategory(cat.id)}
+                  className={`px-4 py-2 rounded-lg font-semibold whitespace-nowrap ${
+                    selectedCategory === cat.id ? "bg-emerald-600 text-white" : "bg-white text-gray-700 hover:bg-gray-100"
+                  }`}
+                >
+                  {cat.name}
+                </button>
+              ))}
+            </div>
+
+            {/* Books */}
+            <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6">
+              {filteredBooks.map(book => {
+                const avg = getAvgRating(book.id);
+                const my = getMyRating(book.id);
+                const isBought = myPurchasedBookIds.has(book.id);
+
+                return (
+                  <div key={book.id} className="bg-white rounded-2xl shadow overflow-hidden hover:shadow-xl transition">
+                    <img src={book.image} alt={book.title} className="w-full h-56 object-cover"/>
+                    <div className="p-4 space-y-3">
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <p className="font-bold text-lg">{book.title}</p>
+                          <p className="text-sm text-gray-600">{book.author}</p>
+                        </div>
+                        <button
+                          onClick={()=>toggleWishlist(book.id)}
+                          className={`text-2xl leading-none ${isWishlisted(book.id) ? "text-rose-500" : "text-gray-300 hover:text-rose-400"}`}
+                          title="Wishlist"
+                        >
+                          ♥
+                        </button>
+                      </div>
+
+                      <div className="flex items-center justify-between">
+                        <p className="text-emerald-700 font-extrabold text-xl">{money(book.price)}</p>
+                        <Badge tone={book.hasPdf ? "green" : "yellow"}>
+                          {book.hasPdf ? "PDF Available" : "Coming Soon"}
+                        </Badge>
+                      </div>
+
+                      {!book.hasPdf ? (
+                        <div className="text-center bg-yellow-50 border border-yellow-200 text-yellow-800 font-semibold py-3 rounded-lg">
+                          📄 Coming Soon (PDF not available)
+                        </div>
+                      ) : (
+                        <button onClick={()=>addToCart(book)} className="w-full bg-emerald-600 text-white py-2 rounded-lg hover:bg-emerald-700 font-semibold">
+                          🛒 Add to Cart
+                        </button>
+                      )}
+
+                      {isBought && book.hasPdf && (
+                        <button onClick={()=>openReader(book)} className="w-full bg-indigo-600 text-white py-2 rounded-lg hover:bg-indigo-700 font-semibold">
+                          📖 Read PDF
+                        </button>
+                      )}
+
+                      <div className="border rounded-2xl p-3">
+                        <div className="flex items-center justify-between">
+                          <p className="text-sm font-bold text-gray-800">Rating</p>
+                          <p className="text-sm text-gray-600">Avg: <b>{avg ? avg.toFixed(1) : "0.0"}</b></p>
+                        </div>
+                        <div className="mt-2">
+                          <Stars value={my} onChange={(v)=>setMyRating(book.id, v)} />
+                        </div>
+                      </div>
+
+                      <div className="border rounded-2xl p-3">
+                        <p className="font-bold text-sm">💬 Reviews</p>
+                        <div className="mt-2 space-y-2 max-h-28 overflow-auto pr-1">
+                          {getBookReviews(book.id).length === 0 ? (
+                            <p className="text-xs text-gray-500">No reviews yet.</p>
+                          ) : (
+                            getBookReviews(book.id).slice(0,3).map(r => (
+                              <div key={r.id} className="border rounded-lg p-2">
+                                <p className="text-xs font-semibold">{r.userName}</p>
+                                <p className="text-xs text-gray-700">{r.text}</p>
+                              </div>
+                            ))
+                          )}
+                        </div>
+
+                        <div className="mt-2 flex gap-2">
+                          <input
+                            className="flex-1 px-3 py-2 border rounded-lg text-sm"
+                            placeholder="Write a short review..."
+                            value={reviewDraft[book.id] || ""}
+                            onChange={(e)=>setReviewDraft(prev=>({...prev, [book.id]: e.target.value}))}
+                          />
+                          <button
+                            onClick={()=>{
+                              addReview(book.id, reviewDraft[book.id] || "");
+                              setReviewDraft(prev=>({...prev, [book.id]:""}));
+                            }}
+                            className="bg-gray-900 text-white px-3 py-2 rounded-lg hover:bg-black text-sm font-semibold"
+                          >
+                            Post
+                          </button>
+                        </div>
+                      </div>
+
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Cart bar */}
+          {cart.length > 0 && (
+            <div className="fixed bottom-0 left-0 right-0 bg-white border-t shadow-lg p-4 z-50">
+              <div className="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-3">
+                <div>
+                  <p className="font-bold">Cart</p>
+                  <p className="text-emerald-700 font-extrabold text-xl">Total: {money(cartTotal)}</p>
+                </div>
+
+                <div className="flex-1 w-full md:max-w-xl">
+                  <div className="flex flex-col gap-2">
+                    {cart.map(it => (
+                      <div key={it.bookId} className="flex items-center justify-between border rounded-lg px-3 py-2">
+                        <div className="flex items-center gap-3">
+                          <img src={it.image} className="w-10 h-10 rounded object-cover border" alt="book"/>
+                          <div>
+                            <p className="font-semibold text-sm">{it.title}</p>
+                            <p className="text-xs text-gray-500">{money(it.price)} each</p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button onClick={()=>changeQty(it.bookId, -1)} className="px-3 py-1 rounded bg-gray-200 hover:bg-gray-300 font-semibold">-</button>
+                          <span className="font-bold w-6 text-center">{it.qty}</span>
+                          <button onClick={()=>changeQty(it.bookId, 1)} className="px-3 py-1 rounded bg-gray-200 hover:bg-gray-300 font-semibold">+</button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="flex gap-2">
+                  <button onClick={()=>setCart([])} className="bg-gray-300 px-6 py-2 rounded-lg hover:bg-gray-400 font-semibold">
+                    Clear
+                  </button>
+                  <button onClick={()=>setConfirmCheckoutOpen(true)} className="bg-emerald-600 text-white px-6 py-2 rounded-lg hover:bg-emerald-700 font-semibold">
+                    💳 Checkout
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<App />);
+  </script>
+</body>
+</html>
